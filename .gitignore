@@ -58,3 +58,5 @@ regtests/chdman/temp
 regtests/jedutil/output
 /CMakeLists.txt
 /samples
+/simpsons.nro
+/simpsons.nacp

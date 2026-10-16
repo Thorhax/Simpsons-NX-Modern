@@ -2688,39 +2688,28 @@ public:
 			ITEM_ID_HAT1UP,
 			ITEM_ID_HAT1DOWN);
 
-		add_button_assignment(assignments, IPT_BUTTON1, { ITEM_ID_BUTTON4 });  // Y = Quick Punch
-		add_button_assignment(assignments, IPT_BUTTON3, { ITEM_ID_BUTTON3 });  // X = Fierce Punch
-		add_button_assignment(assignments, IPT_BUTTON4, { ITEM_ID_BUTTON1 });  // B = Quick Kick
-		add_button_assignment(assignments, IPT_BUTTON6, { ITEM_ID_BUTTON6 });  // A = Fierce Kick
-
-		// Medium Punch: L (or ZR)
+		// The Simpsons: left face buttons attack, right face buttons jump
+		// Attack: B (or Y)
 		{
-			input_seq b2_seq(input_code(DEVICE_CLASS_JOYSTICK, 0, ITEM_CLASS_SWITCH, ITEM_MODIFIER_NONE, ITEM_ID_BUTTON2));
-			b2_seq |= input_code(DEVICE_CLASS_JOYSTICK, 0, ITEM_CLASS_SWITCH, ITEM_MODIFIER_NONE, ITEM_ID_BUTTON8);
+			input_seq b1_seq(input_code(DEVICE_CLASS_JOYSTICK, 0, ITEM_CLASS_SWITCH, ITEM_MODIFIER_NONE, ITEM_ID_BUTTON1));
+			b1_seq |= input_code(DEVICE_CLASS_JOYSTICK, 0, ITEM_CLASS_SWITCH, ITEM_MODIFIER_NONE, ITEM_ID_BUTTON4);
+			assignments.emplace_back(IPT_BUTTON1, SEQ_TYPE_STANDARD, b1_seq);
+		}
+
+		// Jump: A (or X)
+		{
+			input_seq b2_seq(input_code(DEVICE_CLASS_JOYSTICK, 0, ITEM_CLASS_SWITCH, ITEM_MODIFIER_NONE, ITEM_ID_BUTTON6));
+			b2_seq |= input_code(DEVICE_CLASS_JOYSTICK, 0, ITEM_CLASS_SWITCH, ITEM_MODIFIER_NONE, ITEM_ID_BUTTON3);
 			assignments.emplace_back(IPT_BUTTON2, SEQ_TYPE_STANDARD, b2_seq);
 		}
 
-		// Medium Kick: R (or ZL)
+		// one Start/Coin pair per pad, for all four cabinet positions
+		static constexpr ioport_type s_start[4] = { IPT_START1, IPT_START2, IPT_START3, IPT_START4 };
+		static constexpr ioport_type s_coin[4] = { IPT_COIN1, IPT_COIN2, IPT_COIN3, IPT_COIN4 };
+		if (m_player_index < 4)
 		{
-			input_seq b5_seq(input_code(DEVICE_CLASS_JOYSTICK, 0, ITEM_CLASS_SWITCH, ITEM_MODIFIER_NONE, ITEM_ID_BUTTON5));
-			b5_seq |= input_code(DEVICE_CLASS_JOYSTICK, 0, ITEM_CLASS_SWITCH, ITEM_MODIFIER_NONE, ITEM_ID_BUTTON7);
-			assignments.emplace_back(IPT_BUTTON5, SEQ_TYPE_STANDARD, b5_seq);
-		}
-
-		add_button_assignment(assignments, IPT_BUTTON7, { ITEM_ID_BUTTON7 });  // ZL
-		add_button_assignment(assignments, IPT_BUTTON8, { ITEM_ID_BUTTON8 });  // ZR
-		add_button_assignment(assignments, IPT_BUTTON9, { ITEM_ID_BUTTON9 });  // Stick L
-		add_button_assignment(assignments, IPT_BUTTON10, { ITEM_ID_BUTTON10 }); // Stick R
-
-		if (m_player_index == 0)
-		{
-			add_button_assignment(assignments, IPT_START1, { ITEM_ID_START });     // Plus
-			add_button_assignment(assignments, IPT_COIN1, { ITEM_ID_SELECT });     // Minus
-		}
-		else if (m_player_index == 1)
-		{
-			add_button_assignment(assignments, IPT_START2, { ITEM_ID_START });     // Plus
-			add_button_assignment(assignments, IPT_COIN2, { ITEM_ID_SELECT });     // Minus
+			add_button_assignment(assignments, s_start[m_player_index], { ITEM_ID_START });  // Plus
+			add_button_assignment(assignments, s_coin[m_player_index], { ITEM_ID_SELECT });  // Minus
 		}
 		else
 		{
