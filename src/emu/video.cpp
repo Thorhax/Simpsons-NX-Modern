@@ -29,6 +29,10 @@
 
 #include "rendersw.hxx"
 
+#if defined(__SWITCH__)
+#include "nxperf.h"
+#endif
+
 #include <bit>
 #include <cstdio>
 
@@ -807,6 +811,9 @@ osd_ticks_t video_manager::throttle_until_ticks(osd_ticks_t target_ticks)
 
 	// loop until we reach our target
 	auto profile = g_profiler.start(PROFILER_IDLE);
+#if defined(__SWITCH__)
+	nxperf::scope nxperf_scope(nxperf::throttle_wait);
+#endif
 	osd_ticks_t current_ticks = osd_ticks();
 	while (current_ticks < target_ticks)
 	{

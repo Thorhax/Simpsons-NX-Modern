@@ -130,14 +130,23 @@ struct nx_perf_report
 
 	void frame(running_machine &machine, bool skipped, uint64_t render_ticks)
 	{
-		if (!nxperf::enabled.load(std::memory_order_relaxed))
+		bool const log = nxperf::enabled.load(std::memory_order_relaxed);
+		if (!log && !nxperf::overlay.load(std::memory_order_relaxed))
+		{
+			interval_start = 0; // restart cleanly when the overlay is turned on
 			return;
+		}
 
 		uint64_t const now = nxperf::ticks();
 		if (!interval_start)
 		{
 			interval_start = last_frame = now;
 			emu_start = machine.time().as_double();
+			uint64_t c, t, w;
+			nxperf::throttle_wait.take(c, t, w);
+			nxperf::throttle_sleep.take(c, t, w);
+			frames = drawn = 0;
+			worst_frame = render_total = render_worst = 0;
 			return;
 		}
 
@@ -170,6 +179,28 @@ struct nx_perf_report
 		nxperf::sdl_fail.take(fc, ft, fw);
 		uint64_t gc, gt, gw;
 		nxperf::gpu_finish.take(gc, gt, gw);
+		uint64_t wc, wt, ww, sc, st, sw;
+		nxperf::throttle_wait.take(wc, wt, ww);
+		nxperf::throttle_sleep.take(sc, st, sw);
+		uint64_t lc, lt, lw;
+		nxperf::sleep_late.take(lc, lt, lw);
+		unsigned const slept = unsigned(std::clamp(100.0 * double(st) / double(elapsed), 0.0, 100.0) + 0.5);
+		unsigned const busy = unsigned(std::clamp(100.0 - 100.0 * double(wt) / double(elapsed), 0.0, 100.0) + 0.5);
+
+		nxperf::ov_speed10 = unsigned(std::max(speed, 0.0) * 10.0 + 0.5);
+		nxperf::ov_drawn = drawn;
+		nxperf::ov_frames = frames;
+		nxperf::ov_busy = busy;
+		nxperf::ov_skip = unsigned(machine.video().effective_frameskip());
+
+		if (!log)
+		{
+			interval_start = now;
+			emu_start = emu_now;
+			frames = drawn = 0;
+			worst_frame = render_total = render_worst = 0;
+			return;
+		}
 		uint64_t mem_used, mem_heap, mem_borrowed, mem_ipc, mem_device;
 		nxperf::mem_stats(mem_used, mem_heap, mem_borrowed, mem_ipc, mem_device);
 
@@ -177,7 +208,8 @@ struct nx_perf_report
 		std::tm tmv;
 		gmtime_r(&wall, &tmv);
 
-		std::printf("perf %02d:%02d:%02d t=%us speed=%.1f%% skip=%d frames=%u drawn=%u worst_frame=%.1fms"
+		std::printf("perf %02d:%02d:%02d t=%us speed=%.1f%% skip=%d frames=%u drawn=%u busy=%u%% slept=%u%% worst_frame=%.1fms"
+				" | spin %uus late max %.2fms"
 				" | render %.1fms (max %.1f)"
 				" | drc %llu blk %.1fms (max %.1f)"
 				" | disk ram %llu %.1fms, file %llu %.1fms (max %.1f)"
@@ -185,7 +217,8 @@ struct nx_perf_report
 				" | upload %.1fms (max %.1f) present %.1fms (max %.1f) gpu %.1fms (max %.1f) sdlfail %llu tex %lld/%llu"
 				" | mem used %lluMB malloc %lluMB borrowed %lluMB ipc %lluMB dev %lluMB\n",
 				tmv.tm_hour, tmv.tm_min, tmv.tm_sec,
-				seconds, speed, machine.video().effective_frameskip(), frames, drawn, nxperf::ticks_to_ms(worst_frame),
+				seconds, speed, machine.video().effective_frameskip(), frames, drawn, busy, slept, nxperf::ticks_to_ms(worst_frame),
+				nxperf::spin_margin_us.load(), nxperf::ticks_to_ms(lw),
 				nxperf::ticks_to_ms(render_total), nxperf::ticks_to_ms(render_worst),
 				(unsigned long long)dc, nxperf::ticks_to_ms(dt), nxperf::ticks_to_ms(dw),
 				(unsigned long long)hc, nxperf::ticks_to_ms(ht),

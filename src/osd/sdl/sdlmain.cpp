@@ -79,6 +79,9 @@ extern "C" int fileno(FILE *);
 extern "C" u32 __nx_applet_exit_mode;
 
 #include "nxperf.h"
+#include "nxpicker.h"
+#include <atomic>
+#include <unordered_map>
 extern "C" int setenv(const char *name, const char *value, int overwrite);
 
 void nxperf::mem_stats(uint64_t &used, uint64_t &heap, uint64_t &borrowed, uint64_t &ipc, uint64_t &device) noexcept
@@ -108,6 +111,90 @@ void nxperf::mem_stats(uint64_t &used, uint64_t &heap, uint64_t &borrowed, uint6
 		addr = next;
 	}
 }
+
+//============================================================
+//  sampling profiler (opt-in: sdmc:/switch/simpsons/profile.txt)
+//
+//  A thread on core 2 pauses the emulation thread ~1000 times a
+//  second, records its PC and LR, and resumes it.  Histograms are
+//  written to profile_pc.txt every 15 seconds; the addresses are
+//  resolved offline against the ELF (base = nxperf::mem_stats).
+//============================================================
+
+namespace {
+
+struct nx_profiler
+{
+	Handle target = INVALID_HANDLE;
+	Thread thread;
+	std::atomic<bool> stop{ false };
+	std::unordered_map<u64, u32> pcs, lrs;
+	u64 samples = 0, failures = 0;
+
+	void dump()
+	{
+		FILE *f = fopen("sdmc:/switch/simpsons/profile_pc.tmp", "w");
+		if (!f)
+			return;
+		fprintf(f, "base %llx samples %llu failures %llu\n", (unsigned long long)(uintptr_t)&nxperf::mem_stats, (unsigned long long)samples, (unsigned long long)failures);
+		for (auto const &e : pcs)
+			fprintf(f, "pc %llx %u\n", (unsigned long long)e.first, e.second);
+		for (auto const &e : lrs)
+			fprintf(f, "lr %llx %u\n", (unsigned long long)e.first, e.second);
+		fclose(f);
+		remove("sdmc:/switch/simpsons/profile_pc.txt");
+		rename("sdmc:/switch/simpsons/profile_pc.tmp", "sdmc:/switch/simpsons/profile_pc.txt");
+	}
+
+	static void run(void *arg)
+	{
+		auto &p = *reinterpret_cast<nx_profiler *>(arg);
+		u64 last_dump = armGetSystemTick();
+		while (!p.stop.load())
+		{
+			svcSleepThread(1'000'000);
+			ThreadContext ctx;
+			bool ok = false;
+			if (R_SUCCEEDED(svcSetThreadActivity(p.target, ThreadActivity_Paused)))
+			{
+				ok = R_SUCCEEDED(svcGetThreadContext3(&ctx, p.target));
+				svcSetThreadActivity(p.target, ThreadActivity_Runnable);
+			}
+			// only touch the maps (malloc) once the target runs again
+			if (ok)
+			{
+				p.pcs[ctx.pc.x]++;
+				p.lrs[ctx.lr]++;
+				p.samples++;
+			}
+			else
+				p.failures++;
+			if (armTicksToNs(armGetSystemTick() - last_dump) > 15'000'000'000ULL)
+			{
+				p.dump();
+				last_dump = armGetSystemTick();
+			}
+		}
+		p.dump();
+	}
+
+	void start()
+	{
+		// a real handle for this thread (CUR_THREAD_HANDLE only means "me")
+		target = threadGetCurHandle();
+		if (R_SUCCEEDED(threadCreate(&thread, &nx_profiler::run, this, nullptr, 0x10000, 0x20, 2)))
+		{
+			threadStart(&thread);
+			printf("profiler: sampling the emulation thread\n");
+		}
+		else
+			printf("profiler: could not create thread\n");
+	}
+};
+
+nx_profiler s_nx_profiler;
+
+} // anonymous namespace
 
 static void nx_background_thread() noexcept
 {
@@ -224,8 +311,16 @@ int main(int argc, char** argv)
 #endif
 
 #if defined(__SWITCH__)
-	// Allow main thread and all spawned threads to schedule across all 3 CPU cores (preferred core 0)
-	svcSetThreadCoreMask(CUR_THREAD_HANDLE, 0, (1 << 0) | (1 << 1) | (1 << 2));
+	// The emulation runs on this thread: keep it on core 0.  With cores 0-2
+	// allowed it migrated onto core 1 (shared with the higher priority audio
+	// thread), losing its caches.  Worker and audio threads pin themselves to
+	// cores 1/2.
+	svcSetThreadCoreMask(CUR_THREAD_HANDLE, 0, 1 << 0);
+	{
+		struct stat st;
+		if (stat("sdmc:/switch/simpsons/profile.txt", &st) == 0)
+			s_nx_profiler.start();
+	}
 	SDL_SetHint(SDL_HINT_GAMECONTROLLERCONFIG,
 		"000038f853776974636820436f6e7400,Switch Controller,a:b1,b:b0,back:b11,dpdown:b15,dpleft:b12,dpright:b14,dpup:b13,leftshoulder:b6,leftstick:b4,lefttrigger:b8,leftx:a0,lefty:a1,rightshoulder:b7,rightstick:b5,righttrigger:b9,rightx:a2,righty:a3,start:b10,x:b3,y:b2,");
 
@@ -233,24 +328,37 @@ int main(int argc, char** argv)
 	{
 		args.push_back("simpsons");
 	}
+
+	// The Simpsons 4-player sets give each cabinet position its own character,
+	// so a pad's first coin opens a character picker (input_sdl.cpp); the
+	// 2-player sets have an in-game character select instead
+	{
+		std::string_view const system = (args.size() > 1) && !args[1].starts_with('-') ? std::string_view(args[1]) : std::string_view();
+		if (system.starts_with("simpsons") && (system.find("2p") == std::string_view::npos))
+		{
+			static char const *const s_simpsons[] = { "MARGE", "HOMER", "BART", "LISA" };
+			std::copy(std::begin(s_simpsons), std::end(s_simpsons), std::begin(nxpicker::slot_names));
+			nxpicker::slot_count = 4;
+		}
+	}
 	// Switch performance defaults
 	bool has_video = false;
-	bool has_autoframeskip = false;
 	bool has_sleep = false;
 	bool has_skip_gameinfo = false;
 	bool has_numprocessors = false;
 	bool has_audio_latency = false;
 	bool has_joystickprovider = false;
+	bool has_keyboardprovider = false;
 	bool has_samplerate = false;
 	for (const auto &arg : args)
 	{
 		if (arg == "-video") has_video = true;
-		if (arg == "-autoframeskip" || arg == "-afs") has_autoframeskip = true;
 		if (arg == "-sleep" || arg == "-nosleep") has_sleep = true;
 		if (arg == "-skip_gameinfo") has_skip_gameinfo = true;
 		if (arg == "-numprocessors" || arg == "-np") has_numprocessors = true;
 		if (arg == "-audio_latency") has_audio_latency = true;
 		if (arg == "-joystickprovider") has_joystickprovider = true;
+		if (arg == "-keyboardprovider") has_keyboardprovider = true;
 		if (arg == "-samplerate" || arg == "-sr") has_samplerate = true;
 	}
 	if (!has_video)
@@ -258,13 +366,16 @@ int main(int argc, char** argv)
 		args.push_back("-video");
 		args.push_back("accel");
 	}
-	if (!has_autoframeskip)
-	{
-		args.push_back("-autoframeskip");
-	}
+	// No auto-frameskip: as long as the game has headroom,
+	// every emulated frame is drawn and a rare hiccup shows as a brief
+	// slowdown instead of a skipped frame (-autoframeskip brings it back).
+	// Sleep is on: osd_sleep() on Switch sleeps through most of each frame's
+	// idle time and spins only for the last 2ms, instead of keeping core 0 at
+	// ~100%.  It must be requested here because emuopts.cpp defaults "sleep"
+	// to 0 on Switch (from when osd_sleep was a no-op there).
 	if (!has_sleep)
 	{
-		args.push_back("-nosleep");
+		args.push_back("-sleep");
 	}
 	if (!has_numprocessors)
 	{
@@ -280,6 +391,13 @@ int main(int argc, char** argv)
 	{
 		args.push_back("-joystickprovider");
 		args.push_back("switch");
+	}
+	if (!has_keyboardprovider)
+	{
+		// the Switch input module's "Switch UI" device has to be the first
+		// keyboard to carry the UI controls (input_sdl.cpp)
+		args.push_back("-keyboardprovider");
+		args.push_back("none");
 	}
 	if (!has_skip_gameinfo)
 	{

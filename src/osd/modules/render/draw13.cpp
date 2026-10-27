@@ -32,12 +32,14 @@
 
 #if defined(__SWITCH__)
 #include "nxperf.h"
+#include "nxpicker.h"
 #endif
 
 // standard C headers
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <iterator>
 #include <list>
 
@@ -528,11 +530,284 @@ void renderer_sdl2::destroy_all_textures()
 //  sdl_info::draw
 //============================================================
 
+#if defined(__SWITCH__)
+//============================================================
+//  nx_draw_overlay - L + R stats readout
+//
+//  A tiny block font drawn with one SDL_RenderFillRects call:
+//  MAME's UI text costs one blended texture draw per glyph,
+//  which the Switch GPU driver makes expensive enough to slow
+//  the game down.
+//============================================================
+
+static void nx_draw_overlay(SDL_Renderer *renderer)
+{
+	if (!nxperf::overlay.load(std::memory_order_relaxed))
+		return;
+
+	// 3x5 glyphs, one row per entry, bit 2 = left column
+	struct glyph { char ch; uint8_t rows[5]; };
+	static constexpr glyph s_font[] = {
+		{ '0', { 7, 5, 5, 5, 7 } }, { '1', { 2, 6, 2, 2, 7 } }, { '2', { 7, 1, 7, 4, 7 } },
+		{ '3', { 7, 1, 7, 1, 7 } }, { '4', { 5, 5, 7, 1, 1 } }, { '5', { 7, 4, 7, 1, 7 } },
+		{ '6', { 7, 4, 7, 5, 7 } }, { '7', { 7, 1, 1, 1, 1 } }, { '8', { 7, 5, 7, 5, 7 } },
+		{ '9', { 7, 5, 7, 1, 7 } }, { '.', { 0, 0, 0, 0, 2 } }, { '%', { 5, 1, 2, 4, 5 } },
+		{ '/', { 1, 1, 2, 4, 4 } }, { 'S', { 7, 4, 7, 1, 7 } }, { 'P', { 7, 5, 7, 4, 4 } },
+		{ 'D', { 6, 5, 5, 5, 6 } }, { 'F', { 7, 4, 6, 4, 4 } }, { 'K', { 5, 5, 6, 5, 5 } },
+		{ 'I', { 7, 2, 2, 2, 7 } }, { 'C', { 7, 4, 4, 4, 7 } }, { 'U', { 5, 5, 5, 5, 7 } } };
+
+	char text[64];
+	unsigned const speed10 = nxperf::ov_speed10.load(std::memory_order_relaxed);
+	std::snprintf(text, sizeof(text), "SPD %u.%u%%  FPS %u/%u  SKIP %u  CPU %u%%",
+			speed10 / 10, speed10 % 10,
+			nxperf::ov_drawn.load(std::memory_order_relaxed), nxperf::ov_frames.load(std::memory_order_relaxed),
+			nxperf::ov_skip.load(std::memory_order_relaxed), nxperf::ov_busy.load(std::memory_order_relaxed));
+
+	// top right corner, clear of overlays such as Tesla's Status Monitor on the left
+	constexpr int scale = 5, margin = 16, pad = 8;
+	int out_w = 0, out_h = 0;
+	SDL_GetRendererOutputSize(renderer, &out_w, &out_h);
+	int const text_w = int(std::strlen(text)) * 4 * scale - scale;
+	int const box_x = std::max(out_w - margin - text_w - 2 * pad, 0);
+	SDL_Rect rects[64 * 5 * 3];
+	int count = 0;
+	int x = box_x + pad;
+	for (char const *p = text; *p; p++, x += 4 * scale)
+	{
+		auto const g = std::find_if(std::begin(s_font), std::end(s_font), [c = *p] (glyph const &f) { return f.ch == c; });
+		if (g == std::end(s_font))
+			continue;
+		for (int row = 0; row < 5; row++)
+		{
+			// merge each run of set pixels in a row into one rectangle
+			for (int col = 0; col < 3; )
+			{
+				if (!BIT(g->rows[row], 2 - col)) { col++; continue; }
+				int end = col;
+				while (end < 3 && BIT(g->rows[row], 2 - end))
+					end++;
+				rects[count++] = SDL_Rect{ x + col * scale, margin + pad + row * scale, (end - col) * scale, scale };
+				col = end;
+			}
+		}
+	}
+
+	SDL_BlendMode old_mode;
+	Uint8 r, g, b, a;
+	SDL_GetRenderDrawBlendMode(renderer, &old_mode);
+	SDL_GetRenderDrawColor(renderer, &r, &g, &b, &a);
+	SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+	SDL_Rect const box{ box_x, margin, text_w + 2 * pad, 5 * scale + 2 * pad };
+	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+	SDL_RenderFillRect(renderer, &box);
+	SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255);
+	SDL_RenderFillRects(renderer, rects, count);
+	SDL_SetRenderDrawBlendMode(renderer, old_mode);
+	SDL_SetRenderDrawColor(renderer, r, g, b, a);
+}
+//============================================================
+//  nx_draw_picker - character picker popup
+//
+//  Same approach as the stats overlay: a block font drawn
+//  with SDL_RenderFillRects, no textures.
+//============================================================
+
+namespace {
+
+// 5x7 glyphs, '#' = pixel
+struct big_glyph { char ch; char const *rows[7]; };
+constexpr big_glyph s_big_font[] = {
+	{ 'A', { ".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#" } },
+	{ 'B', { "####.", "#...#", "#...#", "####.", "#...#", "#...#", "####." } },
+	{ 'C', { ".###.", "#...#", "#....", "#....", "#....", "#...#", ".###." } },
+	{ 'D', { "####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####." } },
+	{ 'E', { "#####", "#....", "#....", "####.", "#....", "#....", "#####" } },
+	{ 'F', { "#####", "#....", "#....", "####.", "#....", "#....", "#...." } },
+	{ 'G', { ".###.", "#...#", "#....", "#.###", "#...#", "#...#", ".####" } },
+	{ 'H', { "#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#" } },
+	{ 'I', { "#####", "..#..", "..#..", "..#..", "..#..", "..#..", "#####" } },
+	{ 'J', { "..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.." } },
+	{ 'K', { "#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#" } },
+	{ 'L', { "#....", "#....", "#....", "#....", "#....", "#....", "#####" } },
+	{ 'M', { "#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#" } },
+	{ 'N', { "#...#", "##..#", "#.#.#", "#..##", "#...#", "#...#", "#...#" } },
+	{ 'O', { ".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###." } },
+	{ 'P', { "####.", "#...#", "#...#", "####.", "#....", "#....", "#...." } },
+	{ 'Q', { ".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#" } },
+	{ 'R', { "####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#" } },
+	{ 'S', { ".####", "#....", "#....", ".###.", "....#", "....#", "####." } },
+	{ 'T', { "#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.." } },
+	{ 'U', { "#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###." } },
+	{ 'V', { "#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.." } },
+	{ 'W', { "#...#", "#...#", "#...#", "#.#.#", "#.#.#", "##.##", "#...#" } },
+	{ 'X', { "#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#" } },
+	{ 'Y', { "#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.." } },
+	{ 'Z', { "#####", "....#", "...#.", "..#..", ".#...", "#....", "#####" } },
+	{ '0', { ".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###." } },
+	{ '1', { "..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###." } },
+	{ '2', { ".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####" } },
+	{ '3', { "#####", "...#.", "..#..", "...#.", "....#", "#...#", ".###." } },
+	{ '4', { "...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#." } },
+	{ '5', { "#####", "#....", "####.", "....#", "....#", "#...#", ".###." } },
+	{ '6', { "..##.", ".#...", "#....", "####.", "#...#", "#...#", ".###." } },
+	{ '7', { "#####", "....#", "...#.", "..#..", ".#...", ".#...", ".#..." } },
+	{ '8', { ".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###." } },
+	{ '9', { ".###.", "#...#", "#...#", ".####", "....#", "...#.", ".##.." } },
+	{ ':', { ".....", "..#..", "..#..", ".....", "..#..", "..#..", "....." } },
+	{ '-', { ".....", ".....", ".....", "#####", ".....", ".....", "....." } },
+	{ '/', { "....#", "....#", "...#.", "..#..", ".#...", "#....", "#...." } },
+	{ '<', { "...#.", "..#..", ".#...", "#....", ".#...", "..#..", "...#." } },
+	{ '>', { ".#...", "..#..", "...#.", "....#", "...#.", "..#..", ".#..." } } };
+
+class block_text
+{
+public:
+	// glyph cell is 6x8 pixels of `scale` size (5x7 glyph plus spacing)
+	static int width(char const *text, int scale) { return std::max(int(std::strlen(text)) * 6 - 1, 0) * scale; }
+
+	void add(char const *text, int x, int y, int scale)
+	{
+		for (char const *c = text; *c; c++, x += 6 * scale)
+		{
+			auto const g = std::find_if(std::begin(s_big_font), std::end(s_big_font), [ch = *c] (big_glyph const &f) { return f.ch == ch; });
+			if (g == std::end(s_big_font))
+				continue;
+			for (int row = 0; row < 7; row++)
+			{
+				// one rectangle per run of set pixels in a row
+				for (int col = 0; col < 5; )
+				{
+					if (g->rows[row][col] != '#') { col++; continue; }
+					int end = col;
+					while ((end < 5) && (g->rows[row][end] == '#'))
+						end++;
+					if (m_count < std::size(m_rects))
+						m_rects[m_count++] = SDL_Rect{ x + col * scale, y + row * scale, (end - col) * scale, scale };
+					col = end;
+				}
+			}
+		}
+	}
+
+	void add_centered(char const *text, int center_x, int y, int scale) { add(text, center_x - width(text, scale) / 2, y, scale); }
+
+	void flush(SDL_Renderer *renderer, Uint8 r, Uint8 g, Uint8 b)
+	{
+		SDL_SetRenderDrawColor(renderer, r, g, b, 255);
+		SDL_RenderFillRects(renderer, m_rects, m_count);
+		m_count = 0;
+	}
+
+private:
+	SDL_Rect m_rects[2048];
+	int m_count = 0;
+};
+
+void fill(SDL_Renderer *renderer, SDL_Rect const &rect, Uint8 r, Uint8 g, Uint8 b)
+{
+	SDL_SetRenderDrawColor(renderer, r, g, b, 255);
+	SDL_RenderFillRect(renderer, &rect);
+}
+
+} // anonymous namespace
+
+static void nx_draw_picker(SDL_Renderer *renderer)
+{
+	if (!nxpicker::open.load(std::memory_order_relaxed) || (nxpicker::slot_count <= 0))
+		return;
+
+	int const count = nxpicker::slot_count;
+	int const selection = nxpicker::selection.load(std::memory_order_relaxed);
+	std::uint32_t const taken = nxpicker::taken_mask.load(std::memory_order_relaxed);
+
+	int out_w = 0, out_h = 0;
+	SDL_GetRendererOutputSize(renderer, &out_w, &out_h);
+
+	// layout in 1080p units, scaled to the output
+	float const k = out_h / 1080.0f;
+	auto px = [k] (int v) { return std::max(int(v * k + 0.5f), 1); };
+	int const big = px(6), small = px(3);
+	int const cell_w = px(250), cell_h = px(110), gap = px(20);
+	int const box_w = count * cell_w + (count - 1) * gap + 2 * px(40);
+	int const box_h = px(330);
+	int const box_x = (out_w - box_w) / 2, box_y = (out_h - box_h) / 2;
+	int const cx = out_w / 2;
+
+	SDL_BlendMode old_mode;
+	Uint8 r, g, b, a;
+	SDL_GetRenderDrawBlendMode(renderer, &old_mode);
+	SDL_GetRenderDrawColor(renderer, &r, &g, &b, &a);
+	SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+
+	// panel with a border
+	fill(renderer, SDL_Rect{ box_x - px(6), box_y - px(6), box_w + px(12), box_h + px(12) }, 255, 217, 15);
+	fill(renderer, SDL_Rect{ box_x, box_y, box_w, box_h }, 20, 40, 110);
+
+	static block_text text;
+	char title[48];
+	std::snprintf(title, sizeof(title), "CONTROLLER %d: CHOOSE CHARACTER", nxpicker::controller.load(std::memory_order_relaxed));
+	text.add_centered(title, cx, box_y + px(30), small + px(1));
+	text.flush(renderer, 255, 255, 255);
+
+	int const cells_y = box_y + px(100);
+	for (int s = 0; s < count; s++)
+	{
+		int const x = box_x + px(40) + s * (cell_w + gap);
+		bool const is_taken = BIT(taken, s);
+		bool const is_selected = (s == selection) && !is_taken;
+		if (is_selected)
+			fill(renderer, SDL_Rect{ x, cells_y, cell_w, cell_h }, 255, 217, 15);
+		else
+			fill(renderer, SDL_Rect{ x, cells_y, cell_w, cell_h }, is_taken ? 45 : 60, is_taken ? 45 : 80, is_taken ? 60 : 160);
+
+		char const *const name = nxpicker::slot_names[s] ? nxpicker::slot_names[s] : "?";
+		text.add_centered(name, x + cell_w / 2, cells_y + (is_taken ? px(18) : (cell_h - 7 * big) / 2), big);
+		text.flush(renderer, is_selected ? 20 : (is_taken ? 120 : 255), is_selected ? 40 : (is_taken ? 120 : 255), is_selected ? 110 : (is_taken ? 120 : 255));
+		if (is_taken)
+		{
+			text.add_centered("TAKEN", x + cell_w / 2, cells_y + cell_h - px(18) - 7 * small, small);
+			text.flush(renderer, 255, 110, 110);
+		}
+	}
+
+	text.add_centered("< > MOVE   A: COIN IN   B: CANCEL", cx, cells_y + cell_h + px(45), small);
+	text.flush(renderer, 200, 210, 255);
+
+	SDL_SetRenderDrawBlendMode(renderer, old_mode);
+	SDL_SetRenderDrawColor(renderer, r, g, b, a);
+}
+#endif
+
 int renderer_sdl2::draw(int update)
 {
 	texture_info *texture=nullptr;
 	float vofs, hofs;
 	int blit_pixels = 0;
+
+#if defined(__SWITCH__)
+	{
+		// Don't let the GPU fall behind: with an unbounded backlog the display
+		// pipeline eventually starts discarding frames (1-2 fps on screen while
+		// emulation runs at 100%).  Waiting for the previous frame here, before
+		// this frame's texture uploads, keeps the backlog at one frame while the
+		// GPU works in parallel with emulation (waiting right after present cost
+		// the emulation thread ~1.7ms per frame).  The time waited is "gpu" in
+		// the perf log.
+		using gl_finish_func = void (*)(void);
+		static gl_finish_func const s_gl_finish = reinterpret_cast<gl_finish_func>(SDL_GL_GetProcAddress("glFinish"));
+		static bool s_logged = false;
+		if (!s_logged)
+		{
+			s_logged = true;
+			osd_printf_verbose("switch: glFinish %s (before each frame)\n", s_gl_finish ? "enabled" : "not available");
+		}
+		if (s_gl_finish)
+		{
+			nxperf::scope nxperf_scope(nxperf::gpu_finish);
+			s_gl_finish();
+		}
+	}
+#endif
 
 	osd_dim wdim = window().get_size();
 
@@ -620,30 +895,12 @@ int renderer_sdl2::draw(int update)
 	m_last_blit_time = -osd_ticks();
 	{
 #if defined(__SWITCH__)
+		nx_draw_overlay(m_sdl_renderer);
+		nx_draw_picker(m_sdl_renderer);
 		nxperf::scope nxperf_scope(nxperf::gpu_present);
 #endif
 		SDL_RenderPresent(m_sdl_renderer);
 	}
-#if defined(__SWITCH__)
-	{
-		// Don't let the GPU fall behind: with an unbounded backlog the display
-		// pipeline eventually starts discarding frames (1-2 fps on screen while
-		// emulation runs at 100%).  Waiting here also measures GPU time per frame.
-		using gl_finish_func = void (*)(void);
-		static gl_finish_func const s_gl_finish = reinterpret_cast<gl_finish_func>(SDL_GL_GetProcAddress("glFinish"));
-		static bool s_logged = false;
-		if (!s_logged)
-		{
-			s_logged = true;
-			osd_printf_verbose("switch: glFinish %s\n", s_gl_finish ? "enabled" : "not available");
-		}
-		if (s_gl_finish)
-		{
-			nxperf::scope nxperf_scope(nxperf::gpu_finish);
-			s_gl_finish();
-		}
-	}
-#endif
 	m_last_blit_time += osd_ticks();
 
 	return 0;

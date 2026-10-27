@@ -65,11 +65,23 @@ inline counter tex_upload;    // SDL texture data uploads (lock/update + copy)
 inline counter gpu_present;   // SDL_RenderPresent
 inline counter gpu_finish;    // glFinish after present = time until the GPU has caught up
 inline counter sdl_fail;      // failed SDL texture create/lock/update/copy calls
+inline counter throttle_wait; // time the emulation thread spends waiting in the throttle (= idle)
+inline counter throttle_sleep; // part of that wait spent asleep (core free) rather than spinning
+inline counter sleep_late;     // how late each throttle sleep woke up
+inline std::atomic<uint32_t> spin_margin_us{ 2000 }; // throttle spin before each deadline (osd_sleep)
 inline std::atomic<int64_t> tex_live{ 0 };      // SDL textures currently alive
 inline std::atomic<uint64_t> tex_created{ 0 };  // SDL textures created (cumulative)
 
 // per-second perf lines in simpsons.log are opt-in (sdmc:/switch/simpsons/perf.txt)
 inline std::atomic<bool> enabled{ false };
+
+// on-screen stats (L + R), refreshed once per second by the OSD video layer
+inline std::atomic<bool> overlay{ false };
+inline std::atomic<uint32_t> ov_speed10{ 0 };  // emulation speed, 0.1% units
+inline std::atomic<uint32_t> ov_drawn{ 0 };    // frames drawn in the last second
+inline std::atomic<uint32_t> ov_frames{ 0 };   // emulated frames in the last second
+inline std::atomic<uint32_t> ov_busy{ 0 };     // emulation thread busy %, i.e. not waiting in the throttle
+inline std::atomic<uint32_t> ov_skip{ 0 };     // current frameskip level
 
 // filled in by the Switch OSD layer (needs libnx)
 void mem_stats(uint64_t &used, uint64_t &heap, uint64_t &borrowed, uint64_t &ipc, uint64_t &device) noexcept;

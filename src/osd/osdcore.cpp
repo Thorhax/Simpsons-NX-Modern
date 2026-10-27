@@ -5,6 +5,12 @@
 #include <thread>
 #include <chrono>
 
+#if defined(__SWITCH__)
+#include "nxperf.h"
+#include <switch.h>
+#include <algorithm>
+#endif
+
 #if defined(SDLMAME_ANDROID)
 #include <android/log.h>
 #endif
@@ -139,7 +145,11 @@ void osd_vprintf_debug(util::format_argument_pack<char> const &args)
 
 osd_ticks_t osd_ticks() noexcept
 {
-#ifdef _WIN32
+#if defined(__SWITCH__)
+	// the ARM generic timer: a register read, where the std::chrono clock goes
+	// through clock_gettime (the throttle reads this in a loop every frame)
+	return nxperf::ticks();
+#elif defined(_WIN32)
 	LARGE_INTEGER val;
 	QueryPerformanceCounter(&val);
 	return val.QuadPart;
@@ -155,7 +165,9 @@ osd_ticks_t osd_ticks() noexcept
 
 osd_ticks_t osd_ticks_per_second() noexcept
 {
-#ifdef _WIN32
+#if defined(__SWITCH__)
+	return nxperf::TICKS_PER_SEC;
+#elif defined(_WIN32)
 	LARGE_INTEGER val;
 	QueryPerformanceFrequency(&val);
 	return val.QuadPart;
@@ -171,10 +183,47 @@ osd_ticks_t osd_ticks_per_second() noexcept
 void osd_sleep(osd_ticks_t duration) noexcept
 {
 #if defined(__SWITCH__)
-	// On Nintendo Switch, thread sleeping has coarse scheduler granularity (minimum 1ms)
-	// which causes severe oversleeping during video throttling and cuts framerate in half.
-	// We no-op here so throttling relies on ticks comparison without sleeping away execution time.
-	return;
+	// The throttle asks to sleep up to the frame deadline, but a sleeping
+	// thread can wake up late, which would cut the framerate.  So sleep only
+	// until a safety margin before the deadline and return early; the
+	// throttle then spins on the tick count for the rest, which keeps frame
+	// timing exact.  The margin follows how late wake-ups actually are: the
+	// worst lateness of the last ~16 seconds of sleeps plus 0.2 ms, between
+	// 0.25 and 2 ms (a fixed 2 ms spin cost about 12% of core 0).
+	constexpr int64_t MIN_MARGIN_NS = 250'000, MAX_MARGIN_NS = 2'000'000, PAD_NS = 200'000;
+	constexpr int WINDOW_SLEEPS = 120, WINDOWS = 8;
+	static int64_t s_margin_ns = MAX_MARGIN_NS;
+	static int64_t s_window_late[WINDOWS] = { MAX_MARGIN_NS, MAX_MARGIN_NS, MAX_MARGIN_NS, MAX_MARGIN_NS, MAX_MARGIN_NS, MAX_MARGIN_NS, MAX_MARGIN_NS, MAX_MARGIN_NS };
+	static int s_window = 0, s_sleeps = 0;
+
+	int64_t const ns = int64_t(duration) * 1'000'000'000LL / int64_t(osd_ticks_per_second());
+	if (ns > s_margin_ns)
+	{
+		int64_t const want = ns - s_margin_ns;
+		uint64_t const start = nxperf::ticks();
+		{
+			nxperf::scope nxperf_scope(nxperf::throttle_sleep);
+			svcSleepThread(want);
+		}
+		int64_t const slept = int64_t((nxperf::ticks() - start) * 1'000'000'000ULL / nxperf::TICKS_PER_SEC);
+		int64_t const late = std::max<int64_t>(slept - want, 0);
+		nxperf::sleep_late.add(uint64_t(late) * nxperf::TICKS_PER_SEC / 1'000'000'000ULL);
+
+		// the first window of each slot starts at the maximum, so the margin
+		// only comes down once ~16 seconds of real measurements are in
+		if ((s_sleeps == 0) || (late > s_window_late[s_window]))
+			s_window_late[s_window] = (s_sleeps == 0) ? late : std::max(s_window_late[s_window], late);
+		if (++s_sleeps == WINDOW_SLEEPS)
+		{
+			s_sleeps = 0;
+			s_window = (s_window + 1) % WINDOWS;
+			int64_t worst = 0;
+			for (int64_t const w : s_window_late)
+				worst = std::max(worst, w);
+			s_margin_ns = std::clamp(worst + PAD_NS, MIN_MARGIN_NS, MAX_MARGIN_NS);
+			nxperf::spin_margin_us = uint32_t(s_margin_ns / 1000);
+		}
+	}
 #elif defined(_WIN32)
 // sleep_for appears to oversleep on Windows with gcc 8
 	Sleep(duration / (osd_ticks_per_second() / 1000));

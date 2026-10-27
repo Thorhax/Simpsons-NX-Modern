@@ -49,6 +49,8 @@
 
 #if defined(__SWITCH__)
 #include <switch.h>
+#include "nxperf.h"
+#include "nxpicker.h"
 #endif
 
 // winnt.h defines this
@@ -2611,6 +2613,297 @@ private:
 
 #if defined(__SWITCH__)
 
+//============================================================
+//  switch_pad_hub - all physical pads, read once per poll
+//
+//  MAME's joystick N is cabinet position N.  The hub decides
+//  which physical pad drives each position (phys_of), so a
+//  pad can play any position without touching MAME's input
+//  configuration.  On games with one character per position
+//  it also runs the character picker: a pad's first coin opens
+//  a popup, and the coin goes to the position it picks.
+//============================================================
+
+struct switch_pad_hub
+{
+	static constexpr int PADS = 8;
+
+	// every button the devices report; stick direction bits are left out
+	static constexpr std::uint64_t BUTTONS =
+			HidNpadButton_A | HidNpadButton_B | HidNpadButton_X | HidNpadButton_Y |
+			HidNpadButton_L | HidNpadButton_R | HidNpadButton_ZL | HidNpadButton_ZR |
+			HidNpadButton_StickL | HidNpadButton_StickR | HidNpadButton_Plus | HidNpadButton_Minus |
+			HidNpadButton_Up | HidNpadButton_Down | HidNpadButton_Left | HidNpadButton_Right;
+	static constexpr std::uint64_t SHOULDERS = HidNpadButton_L | HidNpadButton_R | HidNpadButton_ZL | HidNpadButton_ZR;
+	static constexpr std::uint64_t PICK_LEFT = HidNpadButton_Left | HidNpadButton_StickLLeft;
+	static constexpr std::uint64_t PICK_RIGHT = HidNpadButton_Right | HidNpadButton_StickLRight;
+	static constexpr auto COIN_PULSE = std::chrono::milliseconds(150);
+
+	PadState pads[PADS];
+	bool connected[PADS] = { };
+	std::uint64_t prev[PADS] = { };
+
+	// filtered state handed to the MAME devices, indexed by physical pad
+	std::uint64_t out_buttons[PADS] = { };
+	std::int32_t out_axes[PADS][4] = { };
+
+	// MAME device (cabinet position) k reads physical pad phys_of[k]
+	int phys_of[PADS] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+
+	// UI controls from every pad, for the "Switch UI" device: MAME only takes UI
+	// controls from the first device of a class, which would tie quit, pause and
+	// the menu to whichever pad plays position 1.  Plus stands for the Plus +
+	// Minus quit combo held on one pad (Plus on one pad and Minus on another is
+	// a start and a coin, not a quit); the left stick acts as the D-pad.
+	std::uint64_t ui_buttons = 0;
+
+	// picker state, indexed by physical pad
+	int claimed[PADS] = { -1, -1, -1, -1, -1, -1, -1, -1 }; // picked position; a claimed pad always drives it
+	bool minus_held_back[PADS] = { };  // this Minus press is kept from the game
+	bool minus_with_plus[PADS] = { };  // Plus came during that press (the quit combo, not a coin)
+	bool pending[PADS] = { };          // waiting for the popup
+	bool mute_until_release[PADS] = { };
+	int open_pad = -1;
+	int selection = 0;
+	int coin_slot = -1;
+	std::chrono::steady_clock::time_point coin_end;
+
+	void init()
+	{
+		for (int p = 0; p < PADS; p++)
+		{
+			std::memset(&pads[p], 0, sizeof(pads[p]));
+			if (p == 0)
+				padInitializeWithMask(&pads[p], (1ULL << HidNpadIdType_Handheld) | (1ULL << HidNpadIdType_No1));
+			else
+				padInitializeWithMask(&pads[p], 1ULL << p);
+			padUpdate(&pads[p]);
+		}
+	}
+
+	int position_of(int pad) const
+	{
+		for (int k = 0; k < PADS; k++)
+			if (phys_of[k] == pad)
+				return k;
+		return pad;
+	}
+
+	std::uint32_t taken_for(int pad) const
+	{
+		std::uint32_t mask = 0;
+		for (int q = 0; q < PADS; q++)
+			if ((q != pad) && connected[q] && (claimed[q] >= 0))
+				mask |= 1U << claimed[q];
+		return mask;
+	}
+
+	int step(int from, int dir, std::uint32_t taken) const
+	{
+		int const count = nxpicker::slot_count;
+		for (int i = 1; i <= count; i++)
+		{
+			int const s = (from + dir * i + count * 2) % count;
+			if (!((taken >> s) & 1))
+				return s;
+		}
+		return from;
+	}
+
+	void open_picker(int pad)
+	{
+		std::uint32_t const taken = taken_for(pad);
+		int start = (claimed[pad] >= 0) ? claimed[pad] : position_of(pad);
+		if ((start >= nxpicker::slot_count) || ((taken >> start) & 1))
+			start = step(start % nxpicker::slot_count, 1, taken);
+		open_pad = pad;
+		selection = start;
+		mute_until_release[pad] = true;
+		nxpicker::controller = pad + 1;
+		nxpicker::selection = selection;
+		nxpicker::taken_mask = taken;
+		nxpicker::open = true;
+		osd_printf_verbose("Switch: picker opened for controller %d\n", pad + 1);
+	}
+
+	void close_picker()
+	{
+		mute_until_release[open_pad] = true;
+		open_pad = -1;
+		nxpicker::open = false;
+	}
+
+	void assign(int pad, int slot)
+	{
+		// swap positions with whichever pad drives the chosen one (never a claimed
+		// pad: claimed positions are not selectable)
+		int const k = position_of(pad);
+		std::swap(phys_of[k], phys_of[slot]);
+		claimed[pad] = slot;
+		coin_slot = slot;
+		coin_end = std::chrono::steady_clock::now() + COIN_PULSE;
+		osd_printf_verbose("Switch: controller %d plays position %d (%s)\n", pad + 1, slot + 1, nxpicker::slot_names[slot]);
+	}
+
+	void run_picker(int pad, std::uint64_t cur)
+	{
+		std::uint64_t const pressed = cur & ~prev[pad];
+		std::uint32_t const taken = taken_for(pad);
+		if (((taken >> selection) & 1))
+			selection = step(selection, 1, taken);
+		if (pressed & PICK_LEFT)
+			selection = step(selection, -1, taken);
+		if (pressed & PICK_RIGHT)
+			selection = step(selection, 1, taken);
+		nxpicker::selection = selection;
+		nxpicker::taken_mask = taken;
+
+		if ((pressed & HidNpadButton_A) && !((taken >> selection) & 1))
+		{
+			assign(pad, selection);
+			close_picker();
+		}
+		else if (pressed & HidNpadButton_B)
+		{
+			osd_printf_verbose("Switch: picker cancelled by controller %d\n", pad + 1);
+			close_picker();
+		}
+	}
+
+	void update()
+	{
+		bool const picking = nxpicker::slot_count > 0;
+		for (int p = 0; p < PADS; p++)
+		{
+			padUpdate(&pads[p]);
+			connected[p] = padIsConnected(&pads[p]);
+			std::uint64_t const cur = connected[p] ? padGetButtons(&pads[p]) : 0;
+
+			// L + R on any pad toggles the lightweight stats overlay (drawn by the
+			// OSD renderer; MAME's own FPS text is too expensive on this GPU driver)
+			constexpr std::uint64_t overlay_combo = HidNpadButton_L | HidNpadButton_R;
+			if (((cur & overlay_combo) == overlay_combo) && ((prev[p] & overlay_combo) != overlay_combo))
+				nxperf::overlay = !nxperf::overlay.load();
+
+			std::uint64_t out = cur & BUTTONS;
+			bool mute = false;
+			if (picking)
+			{
+				if (!connected[p])
+				{
+					claimed[p] = -1;
+					pending[p] = false;
+					if (open_pad == p)
+						close_picker();
+				}
+
+				if (p == open_pad)
+				{
+					run_picker(p, cur);
+					mute = true;
+				}
+				else
+				{
+					// A Minus press from a pad that has no character yet, or with a
+					// shoulder button held, is kept from the game and opens the popup
+					// when released.  With Plus also held it goes through, so the
+					// Plus + Minus quit combo still works.
+					std::uint64_t const minus_now = cur & HidNpadButton_Minus;
+					std::uint64_t const minus_before = prev[p] & HidNpadButton_Minus;
+					if (minus_now && !minus_before)
+					{
+						minus_held_back[p] = (claimed[p] < 0) || (cur & SHOULDERS);
+						minus_with_plus[p] = false;
+					}
+					if (minus_held_back[p])
+					{
+						if (cur & HidNpadButton_Plus)
+							minus_with_plus[p] = true;
+						else
+							out &= ~std::uint64_t(HidNpadButton_Minus);
+						if (!minus_now)
+						{
+							minus_held_back[p] = false;
+							if (!minus_with_plus[p])
+								pending[p] = true;
+						}
+					}
+				}
+
+				if (mute_until_release[p])
+				{
+					if (cur & BUTTONS)
+						mute = true;
+					else
+						mute_until_release[p] = false;
+				}
+			}
+
+			if (mute)
+			{
+				out_buttons[p] = 0;
+				std::fill(std::begin(out_axes[p]), std::end(out_axes[p]), 0);
+			}
+			else
+			{
+				out_buttons[p] = out;
+				HidAnalogStickState const stick_l = padGetStickPos(&pads[p], 0);
+				HidAnalogStickState const stick_r = padGetStickPos(&pads[p], 1);
+				out_axes[p][0] = std::clamp<std::int32_t>((stick_l.x * 65536) / 32767, -65536, 65536);
+				out_axes[p][1] = -std::clamp<std::int32_t>((stick_l.y * 65536) / 32767, -65536, 65536);
+				out_axes[p][2] = std::clamp<std::int32_t>((stick_r.x * 65536) / 32767, -65536, 65536);
+				out_axes[p][3] = -std::clamp<std::int32_t>((stick_r.y * 65536) / 32767, -65536, 65536);
+			}
+			prev[p] = cur;
+		}
+
+		ui_buttons = 0;
+		for (int p = 0; p < PADS; p++)
+		{
+			if (!connected[p] || (p == open_pad) || mute_until_release[p])
+				continue;
+			std::uint64_t const cur = prev[p];
+			std::uint64_t b = cur & BUTTONS & ~std::uint64_t(HidNpadButton_Plus | HidNpadButton_Minus);
+			if ((cur & HidNpadButton_Plus) && (cur & HidNpadButton_Minus))
+				b |= HidNpadButton_Plus;
+			if (cur & HidNpadButton_StickLUp) b |= HidNpadButton_Up;
+			if (cur & HidNpadButton_StickLDown) b |= HidNpadButton_Down;
+			if (cur & HidNpadButton_StickLLeft) b |= HidNpadButton_Left;
+			if (cur & HidNpadButton_StickLRight) b |= HidNpadButton_Right;
+			ui_buttons |= b;
+		}
+
+		if (picking)
+		{
+			// one popup at a time, in controller order
+			if (open_pad < 0)
+			{
+				for (int p = 0; p < PADS; p++)
+				{
+					if (pending[p] && connected[p])
+					{
+						pending[p] = false;
+						open_picker(p);
+						break;
+					}
+				}
+			}
+
+			// the coin for a fresh pick, on the position that pad now drives
+			if (coin_slot >= 0)
+			{
+				if (std::chrono::steady_clock::now() < coin_end)
+					out_buttons[phys_of[coin_slot]] |= HidNpadButton_Minus;
+				else
+					coin_slot = -1;
+			}
+		}
+	}
+};
+
+switch_pad_hub g_switch_pads;
+
+
 class switch_joystick_device : public device_info, protected joystick_assignment_helper
 {
 public:
@@ -2620,20 +2913,15 @@ public:
 		m_buttons{ 0 },
 		m_player_index(player_index)
 	{
-		std::memset(&m_pad, 0, sizeof(m_pad));
-		if (player_index == 0)
-			padInitializeWithMask(&m_pad, (1ULL << HidNpadIdType_Handheld) | (1ULL << HidNpadIdType_No1));
-		else
-			padInitializeWithMask(&m_pad, 1ULL << player_index);
-
-		padUpdate(&m_pad);
 	}
 
 	virtual ~switch_joystick_device() override = default;
 
+	static constexpr int UI_DEVICE = -1;
+
 	bool is_connected() const
 	{
-		return padIsConnected(&m_pad);
+		return (m_player_index == UI_DEVICE) || g_switch_pads.connected[g_switch_pads.phys_of[m_player_index]];
 	}
 
 	virtual void reset() override
@@ -2644,24 +2932,32 @@ public:
 
 	virtual void poll(bool relative_reset) override
 	{
-		padUpdate(&m_pad);
+		// the hub has already read every pad (switch_joystick_module::before_poll);
+		// this cabinet position takes whichever pad currently drives it
+		if (m_player_index == UI_DEVICE)
+		{
+			for (int i = 0; i < 16; i++)
+				m_buttons[i] = (g_switch_pads.ui_buttons & s_buttons[i].mask) ? 0x80 : 0x00;
+			return;
+		}
 
-		const std::uint64_t cur = padGetButtons(&m_pad);
+		int const pad = g_switch_pads.phys_of[m_player_index];
+		std::uint64_t const cur = g_switch_pads.out_buttons[pad];
 
 		for (int i = 0; i < 16; i++)
 			m_buttons[i] = (cur & s_buttons[i].mask) ? 0x80 : 0x00;
 
-		const HidAnalogStickState stick_l = padGetStickPos(&m_pad, 0);
-		const HidAnalogStickState stick_r = padGetStickPos(&m_pad, 1);
-
-		m_axes[0] = std::clamp<std::int32_t>((stick_l.x * 65536) / 32767, -65536, 65536);
-		m_axes[1] = -std::clamp<std::int32_t>((stick_l.y * 65536) / 32767, -65536, 65536);
-		m_axes[2] = std::clamp<std::int32_t>((stick_r.x * 65536) / 32767, -65536, 65536);
-		m_axes[3] = -std::clamp<std::int32_t>((stick_r.y * 65536) / 32767, -65536, 65536);
+		std::copy(std::begin(g_switch_pads.out_axes[pad]), std::end(g_switch_pads.out_axes[pad]), std::begin(m_axes));
 	}
 
 	virtual void configure(osd::input_device &device) override
 	{
+		if (m_player_index == UI_DEVICE)
+		{
+			configure_ui(device);
+			return;
+		}
+
 		device.add_item("Left Stick X", std::string_view(), ITEM_ID_XAXIS, generic_axis_get_state<std::int32_t>, &m_axes[0]);
 		device.add_item("Left Stick Y", std::string_view(), ITEM_ID_YAXIS, generic_axis_get_state<std::int32_t>, &m_axes[1]);
 		device.add_item("Right Stick X", std::string_view(), ITEM_ID_RXAXIS, generic_axis_get_state<std::int32_t>, &m_axes[2]);
@@ -2717,29 +3013,43 @@ public:
 			add_button_assignment(assignments, IPT_SELECT, { ITEM_ID_SELECT });    // Minus
 		}
 
-		// UI navigation
-		add_button_assignment(assignments, IPT_UI_SELECT, { ITEM_ID_BUTTON1 });  // B / UI Select
-		add_button_assignment(assignments, IPT_UI_BACK,   { ITEM_ID_BUTTON6 });  // A / UI Back (Menu back only, does NOT exit game!)
-		add_button_assignment(assignments, IPT_UI_CLEAR,  { ITEM_ID_BUTTON3 });  // X / UI Clear (matching Guarazzo)
-		add_button_assignment(assignments, IPT_UI_MENU,   { ITEM_ID_BUTTON10 }); // Stick R (R3) / UI Menu (doesn't interfere with Coin!)
-		add_button_assignment(assignments, IPT_UI_PAUSE,  { ITEM_ID_BUTTON9 });  // Stick L (L3) / UI Pause
-
-		// Quit to hbmenu: Plus + Minus combo
-		assignments.emplace_back(
-			IPT_UI_CANCEL,
-			SEQ_TYPE_STANDARD,
-			input_seq(
-				input_code(DEVICE_CLASS_JOYSTICK, 0, ITEM_CLASS_SWITCH, ITEM_MODIFIER_NONE, ITEM_ID_START),
-				input_code(DEVICE_CLASS_JOYSTICK, 0, ITEM_CLASS_SWITCH, ITEM_MODIFIER_NONE, ITEM_ID_SELECT)));
-
-		add_button_pair_assignment(assignments, IPT_UI_PREV_GROUP, IPT_UI_NEXT_GROUP, ITEM_ID_BUTTON2, ITEM_ID_BUTTON5);
-		add_button_pair_assignment(assignments, IPT_UI_PAGE_UP, IPT_UI_PAGE_DOWN, ITEM_ID_BUTTON7, ITEM_ID_BUTTON8);
-
 		add_assignment(assignments, IPT_JOYSTICKRIGHT_LEFT, SEQ_TYPE_STANDARD, ITEM_CLASS_SWITCH, ITEM_MODIFIER_LEFT, { ITEM_ID_RXAXIS });
 		add_assignment(assignments, IPT_JOYSTICKRIGHT_RIGHT, SEQ_TYPE_STANDARD, ITEM_CLASS_SWITCH, ITEM_MODIFIER_RIGHT, { ITEM_ID_RXAXIS });
 		add_assignment(assignments, IPT_JOYSTICKRIGHT_UP, SEQ_TYPE_STANDARD, ITEM_CLASS_SWITCH, ITEM_MODIFIER_UP, { ITEM_ID_RYAXIS });
 		add_assignment(assignments, IPT_JOYSTICKRIGHT_DOWN, SEQ_TYPE_STANDARD, ITEM_CLASS_SWITCH, ITEM_MODIFIER_DOWN, { ITEM_ID_RYAXIS });
 
+		device.set_default_assignments(std::move(assignments));
+	}
+
+	// the "Switch UI" keyboard-class device: buttons only, merged from every pad
+	void configure_ui(osd::input_device &device)
+	{
+		for (int i = 0; i < 16; i++)
+		{
+			device.add_item(
+				(s_buttons[i].item_id == ITEM_ID_START) ? "Plus + Minus" : s_buttons[i].name,
+				std::string_view(),
+				s_buttons[i].item_id,
+				generic_button_get_state<std::uint8_t>,
+				&m_buttons[i]);
+		}
+
+		auto const code = [] (input_item_id item) { return input_code(DEVICE_CLASS_KEYBOARD, 0, ITEM_CLASS_SWITCH, ITEM_MODIFIER_NONE, item); };
+		input_device::assignment_vector assignments;
+		assignments.emplace_back(IPT_UI_SELECT, SEQ_TYPE_STANDARD, input_seq(code(ITEM_ID_BUTTON1)));      // B
+		assignments.emplace_back(IPT_UI_BACK, SEQ_TYPE_STANDARD, input_seq(code(ITEM_ID_BUTTON6)));        // A (menu back, does not exit the game)
+		assignments.emplace_back(IPT_UI_CLEAR, SEQ_TYPE_STANDARD, input_seq(code(ITEM_ID_BUTTON3)));       // X
+		assignments.emplace_back(IPT_UI_MENU, SEQ_TYPE_STANDARD, input_seq(code(ITEM_ID_BUTTON10)));       // Stick R (R3)
+		assignments.emplace_back(IPT_UI_PAUSE, SEQ_TYPE_STANDARD, input_seq(code(ITEM_ID_BUTTON9)));       // Stick L (L3)
+		assignments.emplace_back(IPT_UI_CANCEL, SEQ_TYPE_STANDARD, input_seq(code(ITEM_ID_START)));        // Plus + Minus on one pad: quit
+		assignments.emplace_back(IPT_UI_PREV_GROUP, SEQ_TYPE_STANDARD, input_seq(code(ITEM_ID_BUTTON2)));  // L
+		assignments.emplace_back(IPT_UI_NEXT_GROUP, SEQ_TYPE_STANDARD, input_seq(code(ITEM_ID_BUTTON5)));  // R
+		assignments.emplace_back(IPT_UI_PAGE_UP, SEQ_TYPE_STANDARD, input_seq(code(ITEM_ID_BUTTON7)));     // ZL
+		assignments.emplace_back(IPT_UI_PAGE_DOWN, SEQ_TYPE_STANDARD, input_seq(code(ITEM_ID_BUTTON8)));   // ZR
+		assignments.emplace_back(IPT_UI_UP, SEQ_TYPE_STANDARD, input_seq(code(ITEM_ID_HAT1UP)));           // D-pad or left stick
+		assignments.emplace_back(IPT_UI_DOWN, SEQ_TYPE_STANDARD, input_seq(code(ITEM_ID_HAT1DOWN)));
+		assignments.emplace_back(IPT_UI_LEFT, SEQ_TYPE_STANDARD, input_seq(code(ITEM_ID_HAT1LEFT)));
+		assignments.emplace_back(IPT_UI_RIGHT, SEQ_TYPE_STANDARD, input_seq(code(ITEM_ID_HAT1RIGHT)));
 		device.set_default_assignments(std::move(assignments));
 	}
 
@@ -2769,7 +3079,6 @@ private:
 		{ HidNpadButton_Right,  ITEM_ID_HAT1RIGHT, "D-Pad Right" },
 	};
 
-	PadState        m_pad;
 	std::int32_t    m_axes[4];
 	std::uint8_t    m_buttons[16];
 	int             m_player_index;
@@ -2788,7 +3097,10 @@ public:
 		input_module_impl<switch_joystick_device, osd_common_t>::input_init(machine);
 
 		padConfigureInput(8, HidNpadStyleSet_NpadStandard);
+		g_switch_pads.init();
 		osd_printf_verbose("Switch: native input module (libnx pad API)\n");
+		if (nxpicker::slot_count > 0)
+			osd_printf_verbose("Switch: character picker enabled (%d positions)\n", nxpicker::slot_count);
 
 		for (int i = 0; i < 8; ++i)
 		{
@@ -2800,8 +3112,24 @@ public:
 				std::string(name),
 				std::string(id),
 				i);
-			osd_printf_verbose("Switch: %s %s\n", dev.name().c_str(), dev.is_connected() ? "conectado" : "sin conectar");
+			osd_printf_verbose("Switch: %s %s\n", dev.name().c_str(), dev.is_connected() ? "connected" : "not connected");
 		}
+
+		// UI controls (quit, pause, menu) from any pad; MAME takes UI assignments only
+		// from the first device of a class, so this is the first keyboard
+		// (-keyboardprovider none, set in sdlmain.cpp, leaves that slot free)
+		create_device<switch_joystick_device>(
+				DEVICE_CLASS_KEYBOARD,
+				std::string("Switch UI"),
+				std::string("switchui"),
+				switch_joystick_device::UI_DEVICE);
+	}
+
+protected:
+	virtual void before_poll() override
+	{
+		input_module_impl<switch_joystick_device, osd_common_t>::before_poll();
+		g_switch_pads.update();
 	}
 };
 
