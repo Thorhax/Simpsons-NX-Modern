@@ -72,7 +72,7 @@ inline std::atomic<uint32_t> spin_margin_us{ 2000 }; // throttle spin before eac
 inline std::atomic<int64_t> tex_live{ 0 };      // SDL textures currently alive
 inline std::atomic<uint64_t> tex_created{ 0 };  // SDL textures created (cumulative)
 
-// per-second perf lines in simpsons.log are opt-in (sdmc:/switch/simpsons/perf.txt)
+// per-second perf lines in simpsons.log are opt-in (sdmc:/switch/simpsons-arcade/perf.txt)
 inline std::atomic<bool> enabled{ false };
 
 // on-screen stats (L + R), refreshed once per second by the OSD video layer

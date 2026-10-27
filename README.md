@@ -39,7 +39,7 @@ Controls can be remapped in the MAME menu (R3 → Input (this Machine)); changes
 
 ## Required ROM Set
 
-- **SD Path:** `sdmc:/switch/simpsons/roms/simpsons.zip`
+- **SD Path:** `sdmc:/switch/simpsons-arcade/roms/simpsons.zip`
 - **MAME Driver Set:** `simpsons` — *The Simpsons (4 Players World, set 1)*, parent set, MAME 0.289
 - Program ROMs `072-g02.16c`, `072-g01.17c`, `072-j13.13c`, `072-j12.15c`; sound `072-e03.6g`; tiles `072-b07.18h`, `072-b06.16h`; sprites `072-b08.3n` … `072-b11.16l`; samples `072-d05.1f`, `072-d04.1d`; EEPROM `simpsons.12c.nv`.
 
@@ -52,17 +52,20 @@ To boot a clone instead (e.g. `simpsons2p`), pass the set name as a launch argum
 > [!NOTE]
 > Launch with **title override** (full RAM mode, hold R while starting a game) rather than from the album applet.
 
-1. Download `Simpsons-NX-Modern-v1.1.0.zip` from the [Releases](https://github.com/Thorhax/Simpsons-NX-Modern/releases) page.
+1. Download `Simpsons-NX-Modern-v1.1.1.zip` from the [Releases](https://github.com/Thorhax/Simpsons-NX-Modern/releases) page.
 2. Extract it to the root of your SD card and add your ROM, so the layout matches:
 
 ```text
-sdmc:/switch/simpsons/
+sdmc:/switch/simpsons-arcade/
 ├── simpsons.nro
 ├── cfg/
 ├── ini/
 └── roms/
     └── simpsons.zip
 ```
+
+> [!NOTE]
+> v1.1.0 used `sdmc:/switch/simpsons/`, which other homebrew also uses. If you are upgrading, move your `roms/`, `cfg/` and `nvram/` folders into `sdmc:/switch/simpsons-arcade/` and delete the old `simpsons.nro`.
 
 > [!IMPORTANT]
 > The arcade ROMs are copyrighted by Konami and are not included. Use your own legally obtained copy.
@@ -71,10 +74,10 @@ sdmc:/switch/simpsons/
 
 ## Troubleshooting
 
-- `simpsons.log` in `sdmc:/switch/simpsons/` records each session; the previous four are kept as `simpsons.1.log` … `simpsons.4.log`.
+- `simpsons.log` in `sdmc:/switch/simpsons-arcade/` records each session; the previous four are kept as `simpsons.1.log` … `simpsons.4.log`.
 - To check performance in-game, press **L + R**. The overlay updates once per second and shows `SPD` (emulation speed), `FPS drawn/emulated` (60/60 means no frame was skipped), `SKIP` (frameskip level, 0 unless you enable `-autoframeskip`) and `CPU` (how busy the emulation thread is; under about 90% means there is headroom). It is drawn with a single fill call instead of MAME's own FPS text, which uses one blended texture draw per glyph and is slow on the Switch.
-- For per-second performance data, create an empty `sdmc:/switch/simpsons/perf.txt`; delete it to turn logging off.
-- For a CPU profile of the emulation thread, create an empty `sdmc:/switch/simpsons/profile.txt`. About 1000 samples per second are written to `profile_pc.txt` every 15 seconds, and the addresses can be resolved against the ELF's symbols. This has a small cost, so delete the file afterwards.
+- For per-second performance data, create an empty `sdmc:/switch/simpsons-arcade/perf.txt`; delete it to turn logging off.
+- For a CPU profile of the emulation thread, create an empty `sdmc:/switch/simpsons-arcade/profile.txt`. About 1000 samples per second are written to `profile_pc.txt` every 15 seconds, and the addresses can be resolved against the ELF's symbols. This has a small cost, so delete the file afterwards.
 - If controls feel wrong after experimenting, delete `cfg/simpsons.cfg` to restore the defaults above.
 
 ---
@@ -87,7 +90,7 @@ Requires devkitPro (`devkitA64`, `libnx`, `switch-sdl2`, `switch-mesa`, …) via
 ./build_switch.sh
 ```
 
-Produces `simpsons.nro` and an SD-ready `../package/switch/simpsons/` folder.
+Produces `simpsons.nro` and an SD-ready `../package/switch/simpsons-arcade/` folder.
 
 The build runs 4 compile jobs by default; set `JOBS=n` to change that. The devkitPro container is limited to 22GB of RAM and no swap. If you copy `build/` from another port to save time, clean it first (delete `build/projects/sdl/mame/gmake-linux/obj/Release`). Optimization comes only from the `ARCH` flags, so objects compiled earlier without `-O3` are silently kept. Likewise, if a build is killed mid-way, delete any 0-byte objects and `obj/Release/emu.h.gch` before resuming. A precompiled header truncated by an OOM kill makes later files compile to empty objects or use tens of GB of memory.
 

@@ -26,7 +26,7 @@ namespace {
 
 #ifndef INI_PATH
 #if defined(__SWITCH__)
-	#define INI_PATH "sdmc:/switch/simpsons/ini;.;ini"
+	#define INI_PATH "sdmc:/switch/simpsons-arcade/ini;.;ini"
 #elif defined(SDLMAME_WIN32)
 	#define INI_PATH ".;ini;ini/presets"
 #elif defined(SDLMAME_MACOSX)

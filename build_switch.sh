@@ -20,7 +20,7 @@ MAKEARGS=(config=release CC=aarch64-none-elf-gcc CXX=aarch64-none-elf-g++ AR=aar
 # (\"cannot read PCH file\"), so build it alone first (a no-op when current)
 make -f emu.make \"\${MAKEARGS[@]}\" obj/Release/emu.h.gch
 make \"\${MAKEARGS[@]}\" -j${JOBS:-4} mame
-nacptool --create 'The Simpsons' 'Thorhax' '1.1.0' ../../../../../simpsons.nacp
+nacptool --create 'The Simpsons' 'Thorhax' '1.1.1' ../../../../../simpsons.nacp
 elf2nro ../../../../../mame ../../../../../simpsons.nro --icon=${SCRIPT_DIR}/simpsons-icon.jpg --nacp=../../../../../simpsons.nacp
 "
 
@@ -30,8 +30,8 @@ rm -rf "${PKG}"
 mkdir -p "${PKG}"
 cp -a "${SCRIPT_DIR}/switch-package/switch" "${PKG}/"
 find "${PKG}" -name .gitkeep -delete
-cp "${SCRIPT_DIR}/simpsons.nro" "${PKG}/switch/simpsons/simpsons.nro"
+cp "${SCRIPT_DIR}/simpsons.nro" "${PKG}/switch/simpsons-arcade/simpsons.nro"
 
 echo "Build successful:"
 echo " - ${SCRIPT_DIR}/simpsons.nro (boots directly into The Simpsons)"
-echo " - ${PKG}/switch/simpsons/ (copy the 'switch' folder to the SD card root)"
+echo " - ${PKG}/switch/simpsons-arcade/ (copy the 'switch' folder to the SD card root)"

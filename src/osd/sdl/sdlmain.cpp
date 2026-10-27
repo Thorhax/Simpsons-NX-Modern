@@ -113,7 +113,7 @@ void nxperf::mem_stats(uint64_t &used, uint64_t &heap, uint64_t &borrowed, uint6
 }
 
 //============================================================
-//  sampling profiler (opt-in: sdmc:/switch/simpsons/profile.txt)
+//  sampling profiler (opt-in: sdmc:/switch/simpsons-arcade/profile.txt)
 //
 //  A thread on core 2 pauses the emulation thread ~1000 times a
 //  second, records its PC and LR, and resumes it.  Histograms are
@@ -133,7 +133,7 @@ struct nx_profiler
 
 	void dump()
 	{
-		FILE *f = fopen("sdmc:/switch/simpsons/profile_pc.tmp", "w");
+		FILE *f = fopen("sdmc:/switch/simpsons-arcade/profile_pc.tmp", "w");
 		if (!f)
 			return;
 		fprintf(f, "base %llx samples %llu failures %llu\n", (unsigned long long)(uintptr_t)&nxperf::mem_stats, (unsigned long long)samples, (unsigned long long)failures);
@@ -142,8 +142,8 @@ struct nx_profiler
 		for (auto const &e : lrs)
 			fprintf(f, "lr %llx %u\n", (unsigned long long)e.first, e.second);
 		fclose(f);
-		remove("sdmc:/switch/simpsons/profile_pc.txt");
-		rename("sdmc:/switch/simpsons/profile_pc.tmp", "sdmc:/switch/simpsons/profile_pc.txt");
+		remove("sdmc:/switch/simpsons-arcade/profile_pc.txt");
+		rename("sdmc:/switch/simpsons-arcade/profile_pc.tmp", "sdmc:/switch/simpsons-arcade/profile_pc.txt");
 	}
 
 	static void run(void *arg)
@@ -208,25 +208,25 @@ extern "C" void userAppInit(void)
 {
 	romfsInit();
 	mkdir("sdmc:/switch", 0777);
-	mkdir("sdmc:/switch/simpsons", 0777);
-	mkdir("sdmc:/switch/simpsons/roms", 0777);
-	mkdir("sdmc:/switch/simpsons/roms/simpsons", 0777);
-	mkdir("sdmc:/switch/simpsons/ini", 0777);
-	mkdir("sdmc:/switch/simpsons/cfg", 0777);
-	chdir("sdmc:/switch/simpsons");
+	mkdir("sdmc:/switch/simpsons-arcade", 0777);
+	mkdir("sdmc:/switch/simpsons-arcade/roms", 0777);
+	mkdir("sdmc:/switch/simpsons-arcade/roms/simpsons", 0777);
+	mkdir("sdmc:/switch/simpsons-arcade/ini", 0777);
+	mkdir("sdmc:/switch/simpsons-arcade/cfg", 0777);
+	chdir("sdmc:/switch/simpsons-arcade");
 
-	setenv("HOME", "sdmc:/switch/simpsons", 1);
-	osd_setenv("HOME", "sdmc:/switch/simpsons", 1);
+	setenv("HOME", "sdmc:/switch/simpsons-arcade", 1);
+	osd_setenv("HOME", "sdmc:/switch/simpsons-arcade", 1);
 
 	// keep the last few sessions' logs: simpsons.log -> simpsons.1.log -> ... -> simpsons.4.log
-	remove("sdmc:/switch/simpsons/simpsons.4.log");
-	rename("sdmc:/switch/simpsons/simpsons.3.log", "sdmc:/switch/simpsons/simpsons.4.log");
-	rename("sdmc:/switch/simpsons/simpsons.2.log", "sdmc:/switch/simpsons/simpsons.3.log");
-	rename("sdmc:/switch/simpsons/simpsons.1.log", "sdmc:/switch/simpsons/simpsons.2.log");
-	rename("sdmc:/switch/simpsons/simpsons.log", "sdmc:/switch/simpsons/simpsons.1.log");
+	remove("sdmc:/switch/simpsons-arcade/simpsons.4.log");
+	rename("sdmc:/switch/simpsons-arcade/simpsons.3.log", "sdmc:/switch/simpsons-arcade/simpsons.4.log");
+	rename("sdmc:/switch/simpsons-arcade/simpsons.2.log", "sdmc:/switch/simpsons-arcade/simpsons.3.log");
+	rename("sdmc:/switch/simpsons-arcade/simpsons.1.log", "sdmc:/switch/simpsons-arcade/simpsons.2.log");
+	rename("sdmc:/switch/simpsons-arcade/simpsons.log", "sdmc:/switch/simpsons-arcade/simpsons.1.log");
 
 	// Redirect stdout to persistent log file on SD card
-	FILE *fout = freopen("sdmc:/switch/simpsons/simpsons.log", "w", stdout);
+	FILE *fout = freopen("sdmc:/switch/simpsons-arcade/simpsons.log", "w", stdout);
 	if (fout)
 	{
 		setvbuf(stdout, nullptr, _IOLBF, 4096);
@@ -249,7 +249,7 @@ extern "C" void userAppInit(void)
 	// per-second performance logging is opt-in
 	{
 		struct stat st;
-		nxperf::enabled = (stat("sdmc:/switch/simpsons/perf.txt", &st) == 0);
+		nxperf::enabled = (stat("sdmc:/switch/simpsons-arcade/perf.txt", &st) == 0);
 	}
 
 	// local time zone offset so perf lines match capture filenames
@@ -318,7 +318,7 @@ int main(int argc, char** argv)
 	svcSetThreadCoreMask(CUR_THREAD_HANDLE, 0, 1 << 0);
 	{
 		struct stat st;
-		if (stat("sdmc:/switch/simpsons/profile.txt", &st) == 0)
+		if (stat("sdmc:/switch/simpsons-arcade/profile.txt", &st) == 0)
 			s_nx_profiler.start();
 	}
 	SDL_SetHint(SDL_HINT_GAMECONTROLLERCONFIG,
