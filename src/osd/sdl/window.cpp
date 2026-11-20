@@ -30,6 +30,10 @@
 #include <list>
 #include <memory>
 
+#if defined(__SWITCH__)
+#include "nxintro.h"
+#endif
+
 #ifndef _MSC_VER
 #include <unistd.h>
 #endif
@@ -597,6 +601,14 @@ int sdl_window_info::window_init()
 
 	create_target();
 
+#if defined(__SWITCH__)
+	// the screen is the Thorhax intro's while it plays: the game runs behind it
+	// unseen, and the SDL window and GL context are made on the first update
+	// after it ends
+	if (nxintro::held.load(std::memory_order_acquire))
+		return 0;
+#endif
+
 	int result = complete_create();
 
 	// handle error conditions
@@ -715,6 +727,20 @@ osd_dim sdl_window_info::pick_best_mode()
 
 void sdl_window_info::update()
 {
+#if defined(__SWITCH__)
+	if (!platform_window())
+	{
+		if (nxintro::held.load(std::memory_order_acquire))
+			return;
+		if (complete_create())
+			throw emu_fatalerror("Window creation failed after the intro");
+		// SDL turns text input on when video starts, and on the Switch that is
+		// the on-screen keyboard, which comes up once there is a window; MAME
+		// has no keyboard here
+		SDL_StopTextInput();
+	}
+#endif
+
 	// adjust the cursor state
 	update_cursor_state();
 

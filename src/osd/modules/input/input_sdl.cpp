@@ -51,6 +51,7 @@
 #include <switch.h>
 #include "nxperf.h"
 #include "nxpicker.h"
+#include "nxintro.h"
 #endif
 
 // winnt.h defines this
@@ -2773,11 +2774,23 @@ struct switch_pad_hub
 	void update()
 	{
 		bool const picking = nxpicker::slot_count > 0;
+		// while the Thorhax intro plays the game sees untouched pads, and a button
+		// still held when it ends (the one that skipped it) stays muted until
+		// released: Plus + Minus would quit, Minus would open the picker
+		bool const intro = nxintro::held.load(std::memory_order_acquire);
 		for (int p = 0; p < PADS; p++)
 		{
 			padUpdate(&pads[p]);
 			connected[p] = padIsConnected(&pads[p]);
 			std::uint64_t const cur = connected[p] ? padGetButtons(&pads[p]) : 0;
+			if (intro)
+			{
+				mute_until_release[p] = true;
+				out_buttons[p] = 0;
+				std::fill(std::begin(out_axes[p]), std::end(out_axes[p]), 0);
+				prev[p] = cur;
+				continue;
+			}
 
 			// L + R on any pad toggles the lightweight stats overlay (drawn by the
 			// OSD renderer; MAME's own FPS text is too expensive on this GPU driver)
@@ -2829,14 +2842,14 @@ struct switch_pad_hub
 						}
 					}
 				}
+			}
 
-				if (mute_until_release[p])
-				{
-					if (cur & BUTTONS)
-						mute = true;
-					else
-						mute_until_release[p] = false;
-				}
+			if (mute_until_release[p])
+			{
+				if (cur & BUTTONS)
+					mute = true;
+				else
+					mute_until_release[p] = false;
 			}
 
 			if (mute)

@@ -20,7 +20,7 @@ MAKEARGS=(config=release CC=aarch64-none-elf-gcc CXX=aarch64-none-elf-g++ AR=aar
 # (\"cannot read PCH file\"), so build it alone first (a no-op when current)
 make -f emu.make \"\${MAKEARGS[@]}\" obj/Release/emu.h.gch
 make \"\${MAKEARGS[@]}\" -j${JOBS:-4} mame
-nacptool --create 'The Simpsons' 'Thorhax' '1.1.1' ../../../../../simpsons.nacp
+nacptool --create 'The Simpsons' 'Thorhax' '1.2.0' ../../../../../simpsons.nacp
 elf2nro ../../../../../mame ../../../../../simpsons.nro --icon=${SCRIPT_DIR}/simpsons-icon.jpg --nacp=../../../../../simpsons.nacp
 "
 

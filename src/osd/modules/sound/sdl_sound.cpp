@@ -23,10 +23,12 @@
 #if defined(__SWITCH__)
 #include <switch.h>
 #include "nxperf.h"
+#include "nxintro.h"
 #endif
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <map>
@@ -277,6 +279,13 @@ void sound_sdl::sink_callback(void *userdata, uint8_t *data, int len)
 	stream->m_buffer.get((int16_t *)data, len / 2 / stream->m_buffer.channels());
 
 #if defined(__SWITCH__)
+	// silent while the Thorhax intro plays (the game runs behind it)
+	if (nxintro::held.load(std::memory_order_acquire))
+	{
+		std::memset(data, 0, len);
+		return;
+	}
+
 	// Double default audio volume (2x amplification) with soft clamping
 	int16_t *samples = reinterpret_cast<int16_t *>(data);
 	int const num_samples = len / sizeof(int16_t);

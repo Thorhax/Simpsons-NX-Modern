@@ -7,6 +7,7 @@ Standalone Nintendo Switch arcade port of Konami's **The Simpsons** (1991) power
 ## Features
 
 - **Direct Boot:** `simpsons.nro` boots straight into the game, no frontend menu.
+- **Thorhax intro:** a short intro video plays at startup while the game boots behind it, so it ends close to the title screen. The first 3 seconds cannot be skipped; after that any button (A, B, X, Y, Plus, Minus, L, R, ZL, ZR) skips it, and Plus + Minus together skip it at any time.
 - **Four Players, any character:** In the arcade game each cabinet position is one character (1 Marge, 2 Homer, 3 Bart, 4 Lisa). The first time a controller presses Minus, a popup lets it pick its character; the coin goes to that character, and Plus starts it. A character another controller has picked shows as taken.
 - **Native Switch Pad API:** Low-latency libnx `pad` input (handheld, dual Joy-Con or Pro Controller).
 - **Multi-Core Scheduling:** Emulation is pinned to core 0, while audio and worker threads run on cores 1 and 2.
@@ -52,7 +53,7 @@ To boot a clone instead (e.g. `simpsons2p`), pass the set name as a launch argum
 > [!NOTE]
 > Launch with **title override** (full RAM mode, hold R while starting a game) rather than from the album applet.
 
-1. Download `Simpsons-NX-Modern-v1.1.1.zip` from the [Releases](https://github.com/Thorhax/Simpsons-NX-Modern/releases) page.
+1. Download `Simpsons-NX-Modern-v1.2.0.zip` from the [Releases](https://github.com/Thorhax/Simpsons-NX-Modern/releases) page.
 2. Extract it to the root of your SD card and add your ROM, so the layout matches:
 
 ```text
@@ -93,6 +94,8 @@ Requires devkitPro (`devkitA64`, `libnx`, `switch-sdl2`, `switch-mesa`, …) via
 Produces `simpsons.nro` and an SD-ready `../package/switch/simpsons-arcade/` folder.
 
 The build runs 4 compile jobs by default; set `JOBS=n` to change that. The devkitPro container is limited to 22GB of RAM and no swap. If you copy `build/` from another port to save time, clean it first (delete `build/projects/sdl/mame/gmake-linux/obj/Release`). Optimization comes only from the `ARCH` flags, so objects compiled earlier without `-O3` are silently kept. Likewise, if a build is killed mid-way, delete any 0-byte objects and `obj/Release/emu.h.gch` before resuming. A precompiled header truncated by an OOM kill makes later files compile to empty objects or use tens of GB of memory.
+
+The Thorhax intro lives in `src/osd/thorhax_intro/` (see its README; `make_intro.sh` remakes the video and sound from a source video). It is built from the `osd_sdl.make` entries for `thorhax_intro.o` and `pl_mpeg_impl.o`, without the precompiled header. While it plays, MAME starts and runs the game behind it, unseen and unheard and with untouched controllers; the SDL window is made when it ends (`src/osd/nxintro.h`).
 
 The driver list is limited to `src/mame/konami/simpsons.cpp` (`build/generated/mame/mame.flt`); the GENie project files under `build/projects/sdl/mame/gmake-linux` carry the Switch link setup from the Killer Instinct port with the Simpsons driver/device object lists.
 

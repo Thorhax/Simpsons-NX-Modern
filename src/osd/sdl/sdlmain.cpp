@@ -80,6 +80,8 @@ extern "C" u32 __nx_applet_exit_mode;
 
 #include "nxperf.h"
 #include "nxpicker.h"
+#include "nxintro.h"
+#include "thorhax_intro/thorhax_intro.h"
 #include <atomic>
 #include <unordered_map>
 extern "C" int setenv(const char *name, const char *value, int overwrite);
@@ -204,6 +206,16 @@ static void nx_background_thread() noexcept
 	svcSetThreadPriority(CUR_THREAD_HANDLE, 0x30);
 }
 
+// the output hold of the Thorhax intro (nxintro.h)
+extern "C" void RexSwitchHoldOutput(void) { nxintro::held.store(true, std::memory_order_release); }
+extern "C" void RexSwitchReleaseOutput(void) { nxintro::held.store(false, std::memory_order_release); }
+
+void nxintro::wait()
+{
+	while (held.load(std::memory_order_acquire))
+		svcSleepThread(10'000'000);
+}
+
 extern "C" void userAppInit(void)
 {
 	romfsInit();
@@ -324,6 +336,9 @@ int main(int argc, char** argv)
 	SDL_SetHint(SDL_HINT_GAMECONTROLLERCONFIG,
 		"000038f853776974636820436f6e7400,Switch Controller,a:b1,b:b0,back:b11,dpdown:b15,dpleft:b12,dpright:b14,dpup:b13,leftshoulder:b6,leftstick:b4,lefttrigger:b8,leftx:a0,lefty:a1,rightshoulder:b7,rightstick:b5,righttrigger:b9,rightx:a2,righty:a3,start:b10,x:b3,y:b2,");
 
+	// the Thorhax intro plays on its own threads while MAME starts up behind it
+	thorhax::intro::Start();
+
 	if (args.size() <= 1)
 	{
 		args.push_back("simpsons");
@@ -433,6 +448,9 @@ int main(int argc, char** argv)
 	fflush(stderr);
 
 #if defined(__SWITCH__)
+	// the intro may still be playing if MAME stopped early (a missing ROM)
+	nxintro::wait();
+
 	// MAME only quits the SDL subsystems it started; make sure SDL's Switch
 	// backends release all GPU/audio memory before we hand back to hbl,
 	// otherwise hbl can fail (0xD401) reading the next NRO into that memory
